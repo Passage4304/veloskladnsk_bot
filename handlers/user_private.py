@@ -7,9 +7,12 @@ from aiogram.types import Message
 from aiogram.filters import CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 
+from keyboards.common import back_kb
 from states.user_add_ad import AddAdvertisement
 
+from ui.render import render_category, render_condition, render_description, render_name, render_price
 from utils.process_media import process_media, delete_media
+from utils.wizard import pop_state, push_state
 
 from keyboards.categories import categories_kb
 from keyboards.conditions import conditions_kb
@@ -28,6 +31,17 @@ ADS_CHAT_NAME = os.getenv("ADS_CHAT_NAME")
 user_private_router = Router()
 
 
+async def render_by_state(message: Message, state: FSMContext, fsm_state):
+    if fsm_state == AddAdvertisement.name:
+        await render_name(message, state)
+    elif fsm_state == AddAdvertisement.category:
+        await render_category(message, state)
+    elif fsm_state == AddAdvertisement.condition:
+        await render_condition(message, state)
+    elif fsm_state == AddAdvertisement.description:
+        await render_description(message, state)
+
+
 @user_private_router.message(CommandStart())
 async def start_command(message: types.Message):
     await message.answer(
@@ -41,83 +55,104 @@ async def start_command(message: types.Message):
 
 @user_private_router.callback_query(StateFilter(None), F.data == "create_ad")
 async def create_ad_start(callback: types.CallbackQuery, state: FSMContext):
+    await state.update_data(
+        wizard_message_id=callback.message.message_id,
+        wizard_chat_id = callback.message.chat.id
+    )
+
     await callback.answer()
-    await callback.message.edit_text("Введите название для объявления:")
+
     await state.set_state(AddAdvertisement.name)
 
+    await push_state(state, AddAdvertisement.name)
 
-@user_private_router.callback_query(StateFilter("*"), F.data == "back_button")
-async def back_step_handler(callback: types.CallbackQuery, state: FSMContext) -> None:
-    current_state = await state.get_state()
+    await render_name(callback.message, state)
 
-    if current_state == AddAdvertisement.name:
-        await callback.answer(
-            "Вы находитесь на первом шаге.\n"
-            "Возвращаться некуда..."
-        )
+
+@user_private_router.callback_query(F.data == "back_button")
+async def back_handler(callback: types.CallbackQuery, state: FSMContext):
+    prev_state = await pop_state(state)
+
+    if not prev_state:
+        await callback.answer("Вы на первом шаге")
         return
+
+    await state.set_state(prev_state)
+    await render_by_state(callback.message, state, prev_state)
     
-    previous = None
-
-    for step in AddAdvertisement.__all_states__:
-        if step.state == current_state:
-            await state.set_state(previous)
-            await callback.message.edit_text(
-                f"Вы вернулись к предыдущему шагу\n{AddAdvertisement.texts[previous.state]}"
-            )
-        previous = step
-
 
 @user_private_router.message(StateFilter(AddAdvertisement.name), F.text)
-async def create_ad_choose_category(message: types.Message, state: FSMContext):
+async def create_ad_choose_category(message: types.Message, state: FSMContext, bot: Bot):
     await state.update_data(name=message.text)
-    await message.answer(
-        "Выберите категорию для будущего объявления:", 
-        reply_markup=categories_kb(show_back=True)
-    )
-    await state.set_state(AddAdvertisement.category)
+
+    next_state = AddAdvertisement.category
+
+    await push_state(state, next_state)
+    await state.set_state(next_state)
+    await render_category(message, state)
 
 
 @user_private_router.callback_query(StateFilter(AddAdvertisement.category), F.data.startswith("cat:"))
 async def create_ad_choose_condition(callback: types.CallbackQuery, state: FSMContext):
     category_key = callback.data.split(":")[1]
-    
     await state.update_data(category=category_key)
-    await state.set_state(AddAdvertisement.condition)
+    
+    next_state = AddAdvertisement.condition
 
-    await callback.message.edit_text(
-        "Выберите состояние Вашего товара для объявления:", 
-        reply_markup=conditions_kb(show_back=True)
-    )
+    await push_state(state, next_state)
+    await state.set_state(next_state)
+    await render_condition(callback.message, state)
 
 
 @user_private_router.callback_query(StateFilter(AddAdvertisement.condition), F.data.startswith("cond:"))
 async def create_ad_condition_selected(callback: types.CallbackQuery, state: FSMContext):
     condition_key = callback.data.split(":")[1]
-
     await state.update_data(condition=condition_key)
-    await state.set_state(AddAdvertisement.description)
 
-    await callback.message.edit_text(
-        "Введите описание для объявления:"
-    )
+    next_state = AddAdvertisement.description
+
+    await push_state(state, next_state)
+    await state.set_state(next_state)
+    await render_condition(callback.message, state)
 
 
 @user_private_router.message(StateFilter(AddAdvertisement.description), F.text)
-async def create_ad_add_description(message: types.Message, state: FSMContext):
+async def create_ad_add_description(message: types.Message, state: FSMContext, bot: Bot):
     await state.update_data(description=message.text)
-    await message.answer("Введите цену для объявления в рублях")
-    await state.set_state(AddAdvertisement.price)
+
+    next_state = AddAdvertisement.price
+
+    await push_state(state, next_state)
+    await state.set_state(next_state)
+    await render_condition(message, state)
 
 
 @user_private_router.message(StateFilter(AddAdvertisement.price), F.text)
-async def create_ad_add_price(message: types.Message, state: FSMContext):
+async def create_ad_add_price(message: types.Message, state: FSMContext, bot: Bot):
+    data = await state.get_data()
+    wizard_message_id = data["wizard_message_id"]
+    wizard_chat_id = data["wizard_chat_id"]
+
+
     if not message.text.isdigit():
-        await message.answer("Ошибка\nВведите, пожалуйста, корректное число для цены")
+        await bot.edit_message_text(
+            message_id=wizard_message_id, 
+            chat_id=wizard_chat_id,
+            text="Ошибка\nВведите, пожалуйста, корректное число для цены"
+        )
         return
     await state.update_data(price=message.text)
-    await message.answer("Отправьте фотографии для объявления")
-    await state.set_state(AddAdvertisement.photo)
+    await bot.edit_message_text(
+        message_id=wizard_message_id, 
+        chat_id=wizard_chat_id,
+        text="Отправьте фотографии для объявления"
+    )
+
+    next_state = AddAdvertisement.photo
+
+    await push_state(state, next_state)
+    await state.set_state(next_state)
+    await render_condition(message, state)
 
 
 @user_private_router.message(
