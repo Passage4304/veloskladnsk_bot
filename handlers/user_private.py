@@ -10,7 +10,7 @@ from aiogram.fsm.context import FSMContext
 from keyboards.common import back_kb
 from states.user_add_ad import AddAdvertisement
 
-from ui.render import render_category, render_condition, render_description, render_name, render_price
+from ui.render import render_category, render_condition, render_description, render_name, render_photo, render_price
 from utils.process_media import process_media, delete_media
 from utils.wizard import pop_state, push_state
 
@@ -113,7 +113,7 @@ async def create_ad_condition_selected(callback: types.CallbackQuery, state: FSM
 
     await push_state(state, next_state)
     await state.set_state(next_state)
-    await render_condition(callback.message, state)
+    await render_description(callback.message, state)
 
 
 @user_private_router.message(StateFilter(AddAdvertisement.description), F.text)
@@ -124,7 +124,7 @@ async def create_ad_add_description(message: types.Message, state: FSMContext, b
 
     await push_state(state, next_state)
     await state.set_state(next_state)
-    await render_condition(message, state)
+    await render_price(message, state)
 
 
 @user_private_router.message(StateFilter(AddAdvertisement.price), F.text)
@@ -152,37 +152,93 @@ async def create_ad_add_price(message: types.Message, state: FSMContext, bot: Bo
 
     await push_state(state, next_state)
     await state.set_state(next_state)
-    await render_condition(message, state)
+    await render_photo(message, state)
 
 
-@user_private_router.message(
-    StateFilter(AddAdvertisement.photo), F.media_group_id
-)
-async def create_ad_add_media_group(
-    message: types.Message,
-    state: FSMContext,
-    album: list[Message],
-):
-    await process_media(
-        message=message,
-        state=state,
-        album=album,
-    )
+
+@user_private_router.message(StateFilter(AddAdvertisement.photo), F.photo)
+async def add_photo(message: Message, state: FSMContext):
+    data = await state.get_data()
+    media_group = data.get("media_group", [])
+    media_messages_ids = data.get("media_messages_ids", [])
+
+    # Добавляем фото в альбом для публикации
+    media_group.append(types.InputMediaPhoto(media=message.photo[-1].file_id))
+    media_messages_ids.append(message.message_id)
+
+    await state.update_data(media_group=media_group, media_messages_ids=media_messages_ids)
 
 
-@user_private_router.message(
-        StateFilter(AddAdvertisement.photo),
-        F.photo
-)
-async def create_add_add_single_photo(
-    message: types.Message,
-    state: FSMContext,
-):
-    await process_media(
-        message=message,
-        state=state,
-        album=[message],
-    )
+@user_private_router.message(StateFilter(AddAdvertisement.photo), F.media_group_id)
+async def add_media_group(message: Message, state: FSMContext, album: list[Message]):
+    data = await state.get_data()
+    media_group = data.get("media_group", [])
+    media_messages_ids = data.get("media_messages_ids", [])
+
+    for msg in album:
+        media_group.append(types.InputMediaPhoto(media=msg.photo[-1].file_id))
+        media_messages_ids.append(msg.message_id)
+
+    await state.update_data(media_group=media_group, media_messages_ids=media_messages_ids)
+
+
+@user_private_router.callback_query(StateFilter(AddAdvertisement.photo), F.data == "photos_done")
+async def photos_done(callback: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    await callback.answer("Фотографии сохранены!")
+
+    # Переходим к следующему шагу (например публикация)
+    await state.set_state(AddAdvertisement.finish)
+
+    # Можно редактировать wizard‑сообщение фото, чтобы убрать кнопку готово
+    try:
+        await callback.bot.edit_message_text(
+            chat_id=data["wizard_photo_chat_id"],
+            message_id=data["wizard_photo_message_id"],
+            text="Фотографии получены. Готово к публикации.",
+            reply_markup=types.InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        types.InlineKeyboardButton(text="Опубликовать", callback_data="publish_ad"),
+                        types.InlineKeyboardButton(text="Отменить", callback_data="cancel_ad"),
+                    ]
+                ]
+            )
+        )
+    except Exception:
+        pass
+
+
+### TEMPORARY COMMENTED CODE STARTS HERE ###
+# @user_private_router.message(
+#     StateFilter(AddAdvertisement.photo), F.media_group_id
+# )
+# async def create_ad_add_media_group(
+#     message: types.Message,
+#     state: FSMContext,
+#     album: list[Message],
+# ):
+#     await process_media(
+#         message=message,
+#         state=state,
+#         album=album,
+#     )
+
+
+# @user_private_router.message(
+#         StateFilter(AddAdvertisement.photo),
+#         F.photo
+# )
+# async def create_add_add_single_photo(
+#     message: types.Message,
+#     state: FSMContext,
+# ):
+#     await process_media(
+#         message=message,
+#         state=state,
+#         album=[message],
+#     )
+### TEMPORARY COMMENTED CODE ENDS HERE ###
 
 
 @user_private_router.callback_query(
