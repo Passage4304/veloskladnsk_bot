@@ -4,7 +4,7 @@ from aiogram import Bot, types, Router, F
 
 from aiogram.types import Message
 
-from aiogram.filters import CommandStart, StateFilter
+from aiogram.filters import CommandStart, StateFilter, Command
 from aiogram.fsm.context import FSMContext
 
 from data.data import CATEGORIES, CONDITIONS
@@ -77,7 +77,8 @@ async def delete_old_wizard_message(state: FSMContext, bot: Bot):
 
 
 @user_private_router.message(CommandStart())
-async def start_command(message: types.Message):
+async def start_command(message: types.Message, state: FSMContext, bot: Bot):
+    await state.clear() 
     await message.answer(
         'Привет! Я помогу разместить объявление о продаже.\nДля создания объявления нажми кнопку "Создать объявление" ниже',
         reply_markup=single_button_kb(
@@ -139,21 +140,6 @@ async def back_handler(callback: types.CallbackQuery, state: FSMContext):
                 )
         except Exception:
             pass
-
-    # Если возвращаемся с шага "финиш" на шаг "фото" - очищаем фотографии
-    ### TEMP COMMENTED ###
-    # if current_state == AddAdvertisement.finish and prev_state == AddAdvertisement.photo:
-    #     data = await state.get_data()
-
-    #     preview_ids = data.get("preview_messages_ids", [])
-    #     for msg_id in preview_ids:
-    #         try:
-    #             await callback.bot.delete_message(
-    #                 chat_id=callback.message.chat.id, 
-    #                 message_id=msg_id
-    #             )
-    #         except Exception:
-    #             pass
 
         await state.update_data(
             media_group=[],
@@ -564,12 +550,18 @@ async def edit_photos(callback: types.CallbackQuery, state: FSMContext, bot: Bot
 )
 async def create_ad_publish(callback: types.CallbackQuery, state: FSMContext, bot: Bot):
     data = await state.get_data()
+
+    category_key = data.get('category', '-')
+    category_name = CATEGORIES.get(category_key, category_key)
+
+    condition_key = data.get('condition', '-')
+    condition_name = CONDITIONS.get(condition_key, condition_key)
     
     # Формируем описание для публикации
     post_caption = (
         f"🏷️ <b>{data.get('name', '-')}</b>\n\n"
-        f"📂 Категория: {data.get('category', '-')}\n"
-        f"🔧 Состояние: {data.get('condition', '-')}\n"
+        f"📂 Категория: {category_name}\n"
+        f"🔧 Состояние: {condition_name}\n"
         f"💰 Цена: {data.get('price', '-')} руб.\n\n"
         f"📝 Описание:\n{data.get('description', '-')}\n\n"
         f"👤 Контакт: @{callback.from_user.username or 'Написать в ЛС'}"

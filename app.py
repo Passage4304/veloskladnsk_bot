@@ -11,6 +11,8 @@ from handlers.user_private import user_private_router
 
 from middleware.album import AlbumMiddleware
 
+from common.bot_cmds_list import private
+
 
 logging.basicConfig(level=logging.DEBUG)
 
@@ -25,6 +27,7 @@ dp.include_router(user_private_router)
 
 
 async def main():
+    await bot.set_my_commands(commands=private, scope=types.BotCommandScopeAllPrivateChats())
     await dp.start_polling(bot)
 
 asyncio.run(main())
