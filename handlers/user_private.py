@@ -7,6 +7,7 @@ from aiogram.types import Message
 from aiogram.filters import CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 
+from data.data import CATEGORIES, CONDITIONS
 from keyboards.common import back_kb
 from states.user_add_ad import AddAdvertisement
 
@@ -341,12 +342,11 @@ async def cancel_on_photo_step(callback: types.CallbackQuery, state: FSMContext,
     
     # Возвращаемся к шагу цены или показываем сообщение об отмене
     await callback.message.edit_text(
-        "Добавление фотографий отменено. Объявление сохранено без фотографий.\n\nНажмите 'Готово', чтобы продолжить без фото, или 'Отмена' для полной отмены объявления.",
+        "Добавление фотографий отменено.\n\nНажмите 'Отмена' для полной отмены объявления.",
         reply_markup=types.InlineKeyboardMarkup(
             inline_keyboard=[
                 [
-                    types.InlineKeyboardButton(text="✅ Продолжить без фото", callback_data="photos_done"),
-                    types.InlineKeyboardButton(text="↩️ Назад к фото", callback_data="back_button"),
+                    types.InlineKeyboardButton(text="↩️ Назад к цене", callback_data="back_button"),
                 ],
                 [
                     types.InlineKeyboardButton(text="🚫 Отменить всё объявление", callback_data="cancel_ad_full"),
@@ -398,12 +398,18 @@ async def cancel_full_ad_from_photo(callback: types.CallbackQuery, state: FSMCon
 @user_private_router.callback_query(StateFilter(AddAdvertisement.photo), F.data == "photos_done")
 async def photos_done(callback: types.CallbackQuery, state: FSMContext, bot: Bot):
     data = await state.get_data()
-    await callback.answer("Фотографии сохранены!")
 
     media_group = data.get("media_group", [])
     if not media_group:
-        await callback.message.answer("Нет фото для превью.")
+        no_preview_message = await callback.message.answer("Нет фото для превью.")
+        await callback.answer("Добавьте хотя бы одно фото")
+        no_preview_message_id = no_preview_message.message_id
+        tmp_messages = data.get("tmp_messages", [])
+        tmp_messages.append(no_preview_message_id)
+        await state.update_data(tmp_messages=tmp_messages)
         return
+    
+    await callback.answer("Фотографии сохранены!")
     
     # Удаляем старое wizard-сообщение
     await delete_old_wizard_message(state, bot)
@@ -413,12 +419,18 @@ async def photos_done(callback: types.CallbackQuery, state: FSMContext, bot: Bot
 
     await push_state(state, next_state)
     await state.set_state(next_state)
+
+    category_key = data.get('category', '-')
+    category_name = CATEGORIES.get(category_key, category_key)
+
+    condition_key = data.get('condition', '-')
+    condition_name = CONDITIONS.get(condition_key, condition_key)
     
     # Формируем полное превью объявления
     text_preview = (
         f"📌 <b>Название:</b> {data.get('name', '-')}\n"
-        f"📂 <b>Категория:</b> {data.get('category', '-')}\n"
-        f"🔧 <b>Состояние:</b> {data.get('condition', '-')}\n"
+        f"📂 <b>Категория:</b> {category_name}\n"
+        f"🔧 <b>Состояние:</b> {condition_name}\n"
         f"📝 <b>Описание:</b> {data.get('description', '-')}\n"
         f"💰 <b>Цена:</b> {data.get('price', '-')} руб.\n"
         f"\n<b>Превью фотографий:</b>"
