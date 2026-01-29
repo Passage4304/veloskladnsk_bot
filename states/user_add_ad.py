@@ -8,6 +8,7 @@ class AddAdvertisement(StatesGroup):
     price = State()
     description = State()
     photo = State()
+    preview = State()
     finish = State()
 
     texts = {

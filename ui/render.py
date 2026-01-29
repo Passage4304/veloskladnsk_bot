@@ -5,6 +5,7 @@ from aiogram.fsm.context import FSMContext
 from keyboards.categories import categories_kb
 from keyboards.common import back_kb
 from keyboards.conditions import conditions_kb
+from keyboards.photos import photos_kb
 
 
 async def render_name(message: Message, state: FSMContext):
@@ -65,24 +66,30 @@ async def render_price(message: Message, state: FSMContext):
 async def render_photo(message: Message, state: FSMContext):
     data = await state.get_data()
 
-    # Создаем новое сообщение с кнопкой "Готово" и "Отменить"
-    sent = await message.answer(
-        "Отправьте фотографии для объявления (до 10 шт).",
-        reply_markup=types.InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    types.InlineKeyboardButton(text="✅ Готово", callback_data="photos_done"),
-                    types.InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_ad"),
-                ]
-            ]
+    bot = message.bot
+
+    try:
+        await bot.delete_message(
+            chat_id=data["wizard_chat_id"],
+            message_id=data["wizard_message_id"]
         )
+    except Exception:
+        pass   
+
+
+    new_wizard = await bot.send_message(
+        chat_id=message.chat.id,
+        text=(
+            "Отправьте фотографии для объявления 📸\n"
+            "Можно до 10 фото.\n\n"
+            "Когда закончите — нажмите «Готово»."
+        ),
+        reply_markup=photos_kb()
     )
 
-    # Сохраняем id этого сообщения в FSM, чтобы редактировать/удалять его при публикации или отмене
+
     await state.update_data(
-        wizard_photo_message_id=sent.message_id,
-        wizard_photo_chat_id=sent.chat.id,
-        media_group=[],
-        media_messages_ids=[]
+        wizard_message_id=new_wizard.message_id,
+        wizard_chat_id=new_wizard.chat.id
     )
 

@@ -26,6 +26,7 @@ load_dotenv(find_dotenv())
 
 ADS_CHAT_ID = os.getenv("ADS_CHAT_ID")
 ADS_CHAT_NAME = os.getenv("ADS_CHAT_NAME")
+MAX_PHOTOS = 10
 
 
 user_private_router = Router()
@@ -40,6 +41,38 @@ async def render_by_state(message: Message, state: FSMContext, fsm_state):
         await render_condition(message, state)
     elif fsm_state == AddAdvertisement.description:
         await render_description(message, state)
+    elif fsm_state == AddAdvertisement.price:
+        await render_price(message, state)
+    elif fsm_state == AddAdvertisement.photo:
+        await render_photo(message, state)
+    elif fsm_state == AddAdvertisement.preview:
+        # Если возвращаемся на шаг preview, нужно отправить сообщение
+        data = await state.get_data()
+        await message.answer(
+            "Вы на шаге предпросмотра объявления. Используйте кнопки для действий.",
+            reply_markup=types.InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        types.InlineKeyboardButton(text="✅ Опубликовать", callback_data="publish_ad"),
+                        types.InlineKeyboardButton(text="↩️ Назад к фото", callback_data="back_to_photos"),
+                    ]
+                ]
+            )
+        )
+
+async def delete_old_wizard_message(state: FSMContext, bot: Bot):
+    """Удаляет старое wizard-сообщение при переходе на новый шаг"""
+    try:
+        data = await state.get_data()
+        wizard_message_id = data.get("wizard_message_id")
+        wizard_chat_id = data.get("wizard_chat_id")
+        if wizard_message_id and wizard_chat_id:
+            await bot.delete_message(
+                chat_id=wizard_chat_id,
+                message_id=wizard_message_id
+            )
+    except Exception:
+        pass
 
 
 @user_private_router.message(CommandStart())
@@ -55,6 +88,9 @@ async def start_command(message: types.Message):
 
 @user_private_router.callback_query(StateFilter(None), F.data == "create_ad")
 async def create_ad_start(callback: types.CallbackQuery, state: FSMContext):
+    # Очищаем состояние перед началом нового объявления
+    await state.clear()
+
     await state.update_data(
         wizard_message_id=callback.message.message_id,
         wizard_chat_id = callback.message.chat.id
@@ -71,11 +107,59 @@ async def create_ad_start(callback: types.CallbackQuery, state: FSMContext):
 
 @user_private_router.callback_query(F.data == "back_button")
 async def back_handler(callback: types.CallbackQuery, state: FSMContext):
+    current_state = await state.get_state()
     prev_state = await pop_state(state)
 
     if not prev_state:
         await callback.answer("Вы на первом шаге")
         return
+    
+    # Если возвращаемся с шага "preview" на шаг "фото" - очищаем фотографии и превью
+    if current_state == AddAdvertisement.preview and prev_state == AddAdvertisement.photo:
+        data = await state.get_data()
+
+        preview_ids = data.get("preview_messages_ids", [])
+        for msg_id in preview_ids:
+            try:
+                await callback.bot.delete_message(
+                    chat_id=callback.message.chat.id, 
+                    message_id=msg_id
+                )
+            except Exception:
+                pass
+
+        # Удаляем финальное сообщение с кнопками если есть
+        try:
+            final_msg_id = data.get("final_message_id")
+            if final_msg_id:
+                await callback.bot.delete_message(
+                    chat_id=callback.message.chat.id,
+                    message_id=final_msg_id
+                )
+        except Exception:
+            pass
+
+    # Если возвращаемся с шага "финиш" на шаг "фото" - очищаем фотографии
+    ### TEMP COMMENTED ###
+    # if current_state == AddAdvertisement.finish and prev_state == AddAdvertisement.photo:
+    #     data = await state.get_data()
+
+    #     preview_ids = data.get("preview_messages_ids", [])
+    #     for msg_id in preview_ids:
+    #         try:
+    #             await callback.bot.delete_message(
+    #                 chat_id=callback.message.chat.id, 
+    #                 message_id=msg_id
+    #             )
+    #         except Exception:
+    #             pass
+
+        await state.update_data(
+            media_group=[],
+            media_messages_ids=[],
+            preview_messages_ids=[],
+            final_message_id=None
+        )
 
     await state.set_state(prev_state)
     await render_by_state(callback.message, state, prev_state)
@@ -156,129 +240,411 @@ async def create_ad_add_price(message: types.Message, state: FSMContext, bot: Bo
 
 
 
-@user_private_router.message(StateFilter(AddAdvertisement.photo), F.photo)
+@user_private_router.message(
+    StateFilter(AddAdvertisement.photo), 
+    F.photo & ~F.media_group_id
+)
 async def add_photo(message: Message, state: FSMContext):
     data = await state.get_data()
+
     media_group = data.get("media_group", [])
     media_messages_ids = data.get("media_messages_ids", [])
+    tmp_messages = data.get("tmp_messages", [])
 
-    # Добавляем фото в альбом для публикации
-    media_group.append(types.InputMediaPhoto(media=message.photo[-1].file_id))
+
+    if len(media_group) >= MAX_PHOTOS:
+        warn = await message.answer("Можно добавить не более 10 фотографий")
+
+        tmp_messages.append(warn.message_id)
+        await state.update_data(tmp_messages=tmp_messages)        
+
+        await message.delete()
+
+        return
+
+    media_group.append(
+        types.InputMediaPhoto(media=message.photo[-1].file_id)
+    )
     media_messages_ids.append(message.message_id)
 
-    await state.update_data(media_group=media_group, media_messages_ids=media_messages_ids)
+    await state.update_data(
+        media_group=media_group,
+        media_messages_ids=media_messages_ids,
+        tmp_messages=tmp_messages
+    )
 
 
-@user_private_router.message(StateFilter(AddAdvertisement.photo), F.media_group_id)
+@user_private_router.message(
+    StateFilter(AddAdvertisement.photo), 
+    F.media_group_id
+)
 async def add_media_group(message: Message, state: FSMContext, album: list[Message]):
     data = await state.get_data()
     media_group = data.get("media_group", [])
     media_messages_ids = data.get("media_messages_ids", [])
 
-    for msg in album:
-        media_group.append(types.InputMediaPhoto(media=msg.photo[-1].file_id))
+    free_slots = MAX_PHOTOS - len(media_group)
+
+    if free_slots <= 0:
+        await message.answer("Можно добавить не более 10 фотографий")
+
+        for msg in album:
+            await msg.delete()
+
+        return
+
+    for msg in album[:free_slots]:
+        media_group.append(
+            types.InputMediaPhoto(media=msg.photo[-1].file_id)
+        )
         media_messages_ids.append(msg.message_id)
 
-    await state.update_data(media_group=media_group, media_messages_ids=media_messages_ids)
+    for msg in album[free_slots:]:
+        await msg.delete()
 
-
-@user_private_router.callback_query(StateFilter(AddAdvertisement.photo), F.data == "photos_done")
-async def photos_done(callback: types.CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    await callback.answer("Фотографии сохранены!")
-
-    # Переходим к следующему шагу (например публикация)
-    await state.set_state(AddAdvertisement.finish)
-
-    # Можно редактировать wizard‑сообщение фото, чтобы убрать кнопку готово
-    try:
-        await callback.bot.edit_message_text(
-            chat_id=data["wizard_photo_chat_id"],
-            message_id=data["wizard_photo_message_id"],
-            text="Фотографии получены. Готово к публикации.",
-            reply_markup=types.InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [
-                        types.InlineKeyboardButton(text="Опубликовать", callback_data="publish_ad"),
-                        types.InlineKeyboardButton(text="Отменить", callback_data="cancel_ad"),
-                    ]
-                ]
-            )
+    if len(album) > free_slots:
+        await message.answer(
+            f"Добавлено только {free_slots} фото. Лимит — {MAX_PHOTOS}."
         )
-    except Exception:
-        pass
 
-
-### TEMPORARY COMMENTED CODE STARTS HERE ###
-# @user_private_router.message(
-#     StateFilter(AddAdvertisement.photo), F.media_group_id
-# )
-# async def create_ad_add_media_group(
-#     message: types.Message,
-#     state: FSMContext,
-#     album: list[Message],
-# ):
-#     await process_media(
-#         message=message,
-#         state=state,
-#         album=album,
-#     )
-
-
-# @user_private_router.message(
-#         StateFilter(AddAdvertisement.photo),
-#         F.photo
-# )
-# async def create_add_add_single_photo(
-#     message: types.Message,
-#     state: FSMContext,
-# ):
-#     await process_media(
-#         message=message,
-#         state=state,
-#         album=[message],
-#     )
-### TEMPORARY COMMENTED CODE ENDS HERE ###
+    await state.update_data(
+        media_group=media_group, 
+        media_messages_ids=media_messages_ids
+    )
 
 
 @user_private_router.callback_query(
-    StateFilter(AddAdvertisement.finish), F.data == "publish_ad"
+    StateFilter(AddAdvertisement.photo), 
+    F.data == "cancel_ad"
 )
-async def create_ad_publish(callback: types.CallbackQuery, state: FSMContext, bot: Bot):
+async def cancel_on_photo_step(callback: types.CallbackQuery, state: FSMContext, bot: Bot):
     data = await state.get_data()
+    
+    # Удаляем временные фотографии
+    media_message_ids = data.get("media_messages_ids", [])
+    if media_message_ids:
+        await delete_media(
+            bot=bot,
+            chat_id=callback.message.chat.id,
+            message_ids=media_message_ids
+        )
+    
+    # Удаляем временные сообщения
+    tmp_messages = data.get("tmp_messages", [])
+    for msg_id in tmp_messages:
+        try:
+            await bot.delete_message(chat_id=callback.message.chat.id, message_id=msg_id)
+        except Exception:
+            pass
 
-    sended_message = await bot.send_media_group(
-        chat_id=ADS_CHAT_ID, media=data["media_group"]
-    )
-
-    chat_url = f"https://t.me/{ADS_CHAT_NAME}/{sended_message[0].message_id}"
-
-    await callback.answer("Спасибо!\nОбъявление успешно опубликовано!")
+    await callback.answer("Добавление фотографий отменено")
+    
+    # Возвращаемся к шагу цены или показываем сообщение об отмене
     await callback.message.edit_text(
-        "Спасибо!\n"
-        f"Ваше объявление успешно опубликовано!\n"
-        f"Оно доступно по ссылке:\n{chat_url}\n",
-        reply_markup=single_button_kb(
-            text="Создать еще одно!",
-            callback_data="create_ad"
+        "Добавление фотографий отменено. Объявление сохранено без фотографий.\n\nНажмите 'Готово', чтобы продолжить без фото, или 'Отмена' для полной отмены объявления.",
+        reply_markup=types.InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    types.InlineKeyboardButton(text="✅ Продолжить без фото", callback_data="photos_done"),
+                    types.InlineKeyboardButton(text="↩️ Назад к фото", callback_data="back_button"),
+                ],
+                [
+                    types.InlineKeyboardButton(text="🚫 Отменить всё объявление", callback_data="cancel_ad_full"),
+                ]
+            ]
         )
     )
+    
+    # Очищаем данные о фотографиях
+    await state.update_data(
+        media_group=[],
+        media_messages_ids=[],
+        tmp_messages=[]
+    )
 
-    await delete_media(
-        bot=bot,
-        chat_id=callback.message.chat.id,
-        message_ids=data.get("media_messages_ids", [])
+
+@user_private_router.callback_query(
+    StateFilter(AddAdvertisement.photo), 
+    F.data == "cancel_ad_full"
+)
+async def cancel_full_ad_from_photo(callback: types.CallbackQuery, state: FSMContext, bot: Bot):
+    data = await state.get_data()
+    
+    # Удаляем все временные сообщения
+    all_message_ids = (
+        data.get("media_messages_ids", []) + 
+        data.get("tmp_messages", [])
+    )
+    
+    if all_message_ids:
+        await delete_media(
+            bot=bot,
+            chat_id=callback.message.chat.id,
+            message_ids=all_message_ids
+        )
+
+    await callback.answer("Объявление отменено")
+    await callback.message.edit_text(
+        "Создание объявления полностью отменено.\n", 
+        reply_markup=single_button_kb(
+            text="Создать новое объявление",
+            callback_data="create_ad"
+        )
     )
 
     await state.clear()
 
 
+@user_private_router.callback_query(StateFilter(AddAdvertisement.photo), F.data == "photos_done")
+async def photos_done(callback: types.CallbackQuery, state: FSMContext, bot: Bot):
+    data = await state.get_data()
+    await callback.answer("Фотографии сохранены!")
+
+    media_group = data.get("media_group", [])
+    if not media_group:
+        await callback.message.answer("Нет фото для превью.")
+        return
+    
+    # Удаляем старое wizard-сообщение
+    await delete_old_wizard_message(state, bot)
+    
+    # Переходим на финальный шаг превью
+    next_state = AddAdvertisement.preview
+
+    await push_state(state, next_state)
+    await state.set_state(next_state)
+    
+    # Формируем полное превью объявления
+    text_preview = (
+        f"📌 <b>Название:</b> {data.get('name', '-')}\n"
+        f"📂 <b>Категория:</b> {data.get('category', '-')}\n"
+        f"🔧 <b>Состояние:</b> {data.get('condition', '-')}\n"
+        f"📝 <b>Описание:</b> {data.get('description', '-')}\n"
+        f"💰 <b>Цена:</b> {data.get('price', '-')} руб.\n"
+        f"\n<b>Превью фотографий:</b>"
+    )
+
+    # Сначала отправляем текст превью
+    preview_text_message = await bot.send_message(
+        chat_id=callback.message.chat.id,
+        text=text_preview,
+        parse_mode="HTML"
+    )
+
+    # Затем отправляем фотографии как медиагруппу
+    preview_messages = await bot.send_media_group(
+        chat_id=callback.message.chat.id,
+        media=media_group
+    )
+
+    preview_ids = [msg.message_id for msg in preview_messages]
+
+    # Кнопки для финального шага
+    final_kb = types.InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                types.InlineKeyboardButton(text="✅ Опубликовать", callback_data="publish_ad"),
+                types.InlineKeyboardButton(text="↩️ Назад к фото", callback_data="back_to_photos"),
+            ]
+        ]
+    )
+
+    # Отправляем сообщение с кнопками действий
+    final_message = await bot.send_message(
+        chat_id=callback.message.chat.id,
+        text="<b>Это будет выглядеть так в канале.</b>\n\nВсё верно? Нажмите 'Опубликовать' для размещения объявления.",
+        parse_mode="HTML",
+        reply_markup=final_kb
+    )
+
+    # Обновляем состояние
+    await state.update_data(
+        wizard_message_id=final_message.message_id,
+        wizard_chat_id=final_message.chat.id,
+        preview_messages_ids=[preview_text_message.message_id] + preview_ids,
+        final_message_id=final_message.message_id
+    )
+
+    # Удаляем временные сообщения
+    tmp_messages = data.get("tmp_messages", [])
+    for msg_id in tmp_messages:
+        try:
+            await bot.delete_message(chat_id=callback.message.chat.id, message_id=msg_id)
+        except Exception:
+            pass
+    await state.update_data(tmp_messages=[])
+    
+
+@user_private_router.callback_query(StateFilter(AddAdvertisement.preview), F.data == "back_to_photos")
+async def back_to_photos(callback: types.CallbackQuery, state: FSMContext, bot: Bot):
+    data = await state.get_data()
+
+    # Удаляем превью сообщения
+    for msg_id in data.get("preview_messages_ids", []):
+        try:
+            await bot.delete_message(chat_id=callback.message.chat.id, message_id=msg_id)
+        except Exception:
+            pass
+
+    # Удаляем финальное сообщение с кнопками
+    try:
+        await bot.delete_message(chat_id=callback.message.chat.id, message_id=data["final_message_id"])
+    except Exception:
+        pass
+
+    # Удаляем старое wizard-сообщение
+    await delete_old_wizard_message(state, bot)
+
+    # ВАЖНО: Очищаем старые фотографии перед возвратом на шаг фото
+    await state.update_data(
+        media_group=[],      # Очищаем список медиа
+        media_messages_ids=[],  # Очищаем ID сообщений с фото
+        preview_messages_ids=[],  # Очищаем список ID превью
+        final_message_id=None  # Очищаем final_message_id
+    )
+
+    # Также нужно очистить стек состояний, чтобы корректно работала кнопка "Назад"
+    # Извлекаем текущее состояние из стека (preview)
+    await pop_state(state)
+    # Затем возвращаемся к photo (которое должно остаться в стеке)
+
+    # Возвращаемся на шаг фото
+    await state.set_state(AddAdvertisement.photo)
+
+    # Возвращаемся на шаг фото
+    ### TEMP COMMENTED ###
+    # prev_state = AddAdvertisement.photo
+    # await state.set_state(prev_state)
+    await render_photo(callback.message, state)
+    await callback.answer("Вы вернулись к редактированию фотографий")
+
+
+@user_private_router.callback_query(StateFilter(AddAdvertisement.finish), F.data == "edit_photos")
+async def edit_photos(callback: types.CallbackQuery, state: FSMContext, bot: Bot):
+    data = await state.get_data()
+
+    # Удаляем превью (текст + превью медиа)
+    for msg_id in data.get("preview_messages_ids", []):
+        try:
+            await bot.delete_message(chat_id=callback.message.chat.id, message_id=msg_id)
+        except Exception:
+            pass
+
+    try:
+        await bot.delete_message(chat_id=callback.message.chat.id, message_id=data["wizard_message_id"])
+    except Exception:
+        pass
+
+    # Очищаем фотографии
+    await state.update_data(
+        media_group=[],  # Очищаем список медиа
+        media_messages_ids=[],  # Очищаем ID сообщений с фото
+    )
+        
+    # Возвращаемся на шаг фото
+    await state.set_state(AddAdvertisement.photo)
+    await render_photo(callback.message, state)
+    await callback.answer("Вы вернулись к редактированию фотографий")
+
+
 @user_private_router.callback_query(
-    StateFilter(AddAdvertisement.finish), F.data == "cancel_ad"
+    StateFilter(AddAdvertisement.preview), F.data == "publish_ad"
+)
+async def create_ad_publish(callback: types.CallbackQuery, state: FSMContext, bot: Bot):
+    data = await state.get_data()
+    
+    # Формируем описание для публикации
+    post_caption = (
+        f"🏷️ <b>{data.get('name', '-')}</b>\n\n"
+        f"📂 Категория: {data.get('category', '-')}\n"
+        f"🔧 Состояние: {data.get('condition', '-')}\n"
+        f"💰 Цена: {data.get('price', '-')} руб.\n\n"
+        f"📝 Описание:\n{data.get('description', '-')}\n\n"
+        f"👤 Контакт: @{callback.from_user.username or 'Написать в ЛС'}"
+    )
+    
+    # Копируем медиагруппу и добавляем подпись к первой фотографии
+    media_group_for_post = []
+    for i, media in enumerate(data.get("media_group", [])):
+        media_copy = types.InputMediaPhoto(media=media.media)
+        if i == 0:  # Только к первой фотографии добавляем подпись
+            media_copy.caption = post_caption
+            media_copy.parse_mode = "HTML"
+        media_group_for_post.append(media_copy)
+    
+    # Отправляем объявление в канал
+    try:
+        sended_messages = await bot.send_media_group(
+            chat_id=ADS_CHAT_ID, 
+            media=media_group_for_post
+        )
+        
+        # Получаем ссылку на пост
+        first_message_id = sended_messages[0].message_id
+        chat_url = f"https://t.me/{ADS_CHAT_NAME}/{first_message_id}"
+        
+        await callback.answer("Спасибо!\nОбъявление успешно опубликовано!")
+        
+        # Обновляем сообщение с результатом
+        await bot.edit_message_text(
+            chat_id=callback.message.chat.id,
+            message_id=callback.message.message_id,
+            text=(
+                "✅ <b>Объявление успешно опубликовано!</b>\n\n"
+                f"Ссылка на объявление:\n{chat_url}\n\n"
+                "Спасибо за использование нашего бота! 🎉"
+            ),
+            parse_mode="HTML",
+            reply_markup=single_button_kb(
+                text="Создать еще одно!",
+                callback_data="create_ad"
+            )
+        )
+        
+    except Exception as e:
+        await callback.answer("Ошибка при публикации объявления")
+        await callback.message.edit_text(
+            "❌ <b>Произошла ошибка при публикации объявления.</b>\n\n"
+            "Пожалуйста, попробуйте позже или обратитесь к администратору.",
+            parse_mode="HTML"
+        )
+        print(f"Ошибка публикации: {e}")
+        return
+    
+    # Очищаем временные файлы и состояние
+    await delete_media(
+        bot=bot,
+        chat_id=callback.message.chat.id,
+        message_ids=(
+            data.get("media_messages_ids", []) + 
+            data.get("tmp_messages", [])
+        )
+    )
+    
+    # Удаляем превью сообщения
+    for msg_id in data.get("preview_messages_ids", []):
+        try:
+            await bot.delete_message(chat_id=callback.message.chat.id, message_id=msg_id)
+        except Exception:
+            pass
+
+    await state.clear()
+
+
+@user_private_router.callback_query(
+    StateFilter(AddAdvertisement.preview), F.data == "cancel_ad"
 )
 async def create_ad_cancel(callback: types.CallbackQuery, state: FSMContext, bot: Bot):
     data = await state.get_data()
 
+    # Удаляем превью сообщения
+    for msg_id in data.get("preview_messages_ids", []):
+        try:
+            await bot.delete_message(chat_id=callback.message.chat.id, message_id=msg_id)
+        except Exception:
+            pass
+
+    # Удаляем временные фотографии
     await delete_media(
         bot=bot,
         chat_id=callback.message.chat.id,
@@ -294,4 +660,5 @@ async def create_ad_cancel(callback: types.CallbackQuery, state: FSMContext, bot
         )
     )
 
+    # Очищаем все данные
     await state.clear()
